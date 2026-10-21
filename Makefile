@@ -1,9 +1,9 @@
 # Change these lines before running `make tar`
-FIRST_NAME=Misbah
-LAST_NAME=Zarrar
-KUID=XXXXXXX
+FIRST_NAME=Logan
+LAST_NAME=Whitt
+KUID=3152587
 
-LAB=09
+LAB=08
 TAR_BASENAME=Lab$(LAB)_$(FIRST_NAME)_$(LAST_NAME)_$(KUID)
 DELIVERABLES=./examples ./src examples.pl
 

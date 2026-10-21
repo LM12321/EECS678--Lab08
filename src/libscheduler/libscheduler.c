@@ -16,10 +16,29 @@
 */
 typedef struct _job_t
 {
+  const int id;
+  int arrival_time;
+  int running_time;
+  int remaning_time;  // for premtive short short first
+  const int priority;
 
+  const int start_time;
+  int end_time;
 } job_t;
 
+priqueue_t job_queue;
+scheme_t job_scheme;
+int total_cores;
+job_t** core_status;
+int last_update_time = 0;
 
+job_t** completed_jobs = NULL;
+int total_jobs = 0;
+
+// make job comparer
+int job_comparer(const void* a, const void* b){
+  return 0;
+}
 /**
   Initalizes the scheduler.
  
@@ -34,6 +53,15 @@ typedef struct _job_t
 */
 void scheduler_start_up(int cores, scheme_t scheme)
 {
+  if (cores <= 0){
+    fprintf(stderr, "Invalid number of cores given: %d\n", cores);
+    exit(EXIT_FAILURE);
+  }
+
+  total_cores = cores;
+  job_scheme = scheme;
+  core_status = (job_t**)calloc(cores, sizeof(job_t));
+  priqueue_init(&job_queue, )
 
 }
 
