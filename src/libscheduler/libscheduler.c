@@ -29,6 +29,7 @@ typedef struct _job_t
   int end_time;
 
   int time_last_updated;
+  int quantum_order;
 
 } job_t;
 
@@ -107,11 +108,7 @@ int rr_comparer(const void* a, const void* b){
   job_t* job_a = (job_t*)a;
   job_t* job_b = (job_t*)b;
 
-  if (job_a->time_last_updated == job_b->time_last_updated){
-    return job_a->arrival_time - job_b->arrival_time;
-  }
-
-  return job_a->time_last_updated - job_b->time_last_updated;
+  return job_a->quantum_order - job_b->quantum_order;
 }
 
 
@@ -222,6 +219,7 @@ int scheduler_new_job(int job_number, int time, int running_time, int priority)
   new_job->remaining_time = running_time;  // for psjf
   new_job->priority = priority;
   new_job->start_time = -1;
+  new_job->quantum_order = 0;
 
   int i;
 
@@ -230,7 +228,8 @@ int scheduler_new_job(int job_number, int time, int running_time, int priority)
   for (i = 0; i < total_cores; i++){
 
     if (core_status[i] == NULL){
-      new_job->start_time = time;
+      if (new_job->start_time == -1)
+        new_job->start_time = time;
       new_job->time_last_updated = time;
       core_status[i] = new_job;
       return i;
@@ -316,10 +315,9 @@ int scheduler_new_job(int job_number, int time, int running_time, int priority)
     break;
   }
   case RR: 
-    // update all times for the cores for quantum check
-    for (i = 0; i < total_cores; i++){
-      core_status[i]->time_last_updated = time; 
-    }
+    //quantum order is already initialized to 0 so only alter it if things in job queue
+    if (priqueue_peek(&job_queue) != NULL)
+      new_job->quantum_order = priqueue_size(&job_queue);  // set the quantum order to 1 after the size of the job queue
   default:  // if we don't allow premting in the first place
     priqueue_offer(&job_queue, new_job);
     return -1;
@@ -359,8 +357,6 @@ int scheduler_job_finished(int core_id, int job_number, int time)
 
   core_status[core_id] = NULL;
 
-
-
   priqueue_offer(&completed_jobs, finished_job);  // add finished job to completed jobs "queue"
   
   if (priqueue_peek(&job_queue) == NULL){
@@ -371,9 +367,17 @@ int scheduler_job_finished(int core_id, int job_number, int time)
   if (job_to_add->start_time == -1){
     job_to_add->start_time = time;
   }
-
+  job_to_add->time_last_updated = time;
   core_status[core_id] = job_to_add;
 
+  if (job_scheme == RR){
+    // decrement all quantum orders in the job queue by 1 to account for the decrease in size
+    for (int i = 0; i < priqueue_size(&job_queue); i++){
+      job_t* job = priqueue_at(&job_queue, i);
+      job->quantum_order -= 1;
+      assert(job->quantum_order >=0);
+    }
+  }
 
   return job_to_add->id;
 
@@ -395,17 +399,26 @@ int scheduler_job_finished(int core_id, int job_number, int time)
  */
 int scheduler_quantum_expired(int core_id, int time)
 {
-  job_t* expired_job = core_status[core_id];
+  job_t* expired_job = core_status[core_id];  
   assert(expired_job != NULL);
-
-  expired_job->time_last_updated = time;
-  
+  expired_job->quantum_order = priqueue_size(&job_queue); // set quantum order to current size of job queue
   if (priqueue_peek(&job_queue) == NULL){
-    return -1;
+    core_status[core_id] = expired_job; // just add the expired job back into job queue
+    return expired_job->id;
   }
+ 
+  priqueue_offer(&job_queue, expired_job); // add expired job to job queue
+  // new job to add
   job_t* new_job = priqueue_remove_at(&job_queue, 0);
-  priqueue_offer(&job_queue, expired_job);
+  new_job->quantum_order = -1; // set quantum order to a negative value
   core_status[core_id] = new_job;
+
+  // decrement all quantum orders in the job queue by 1 to account for the decrease in size
+  for (int i = 0; i < priqueue_size(&job_queue); i++){
+    job_t* job = priqueue_at(&job_queue, i);
+    job->quantum_order -= 1;
+    assert(job->quantum_order >=0);
+  }
 	return new_job->id;
 }
 
