@@ -8,6 +8,9 @@
 #include "libscheduler.h"
 #include "../libpriqueue/libpriqueue.h"
 
+#include <assert.h>   // for debugging
+#include <stdbool.h> // for flags
+
 
 /**
   Stores information making up a job to be scheduled including any statistics.
@@ -16,15 +19,22 @@
 */
 typedef struct _job_t
 {
-  const int id;
+  int id;
   int arrival_time;
-  int running_time;
-  int remaning_time;  // for premtive short short first
-  const int priority;
+  int burst_time;
+  int remaining_time;  // for premtive short short first
+  int priority;
 
-  const int start_time;
+  int start_time;
   int end_time;
+
+  int time_last_updated;
+
 } job_t;
+
+// #define DEBUG
+
+
 
 priqueue_t job_queue;
 scheme_t job_scheme;
@@ -32,13 +42,79 @@ int total_cores;
 job_t** core_status;
 int last_update_time = 0;
 
-job_t** completed_jobs = NULL;
-int total_jobs = 0;
 
-// make job comparer
-int job_comparer(const void* a, const void* b){
-  return 0;
+// int total_jobs = 0;
+priqueue_t completed_jobs;
+
+int completed_jobs_comparer(const void* a, const void* b){
+  return ((const job_t*) a)->end_time - ((const job_t*) b)->end_time;
 }
+
+// job_t** completed_jobs = NULL;
+
+
+// make each job comparer depending on scheme
+
+/*
+  For a given priqueue_t<T> (elements of type T)...
+
+  comparer: (l: T, r: T) -> int
+    - given 2 elements of type T, returns an int representing the comparison status of the element priority values
+    - comparer(l, r) < 0 <=> l is higher priority than r
+    - comparer(l, r) > 0 <=> l is lower priority than r
+    - comparer(l, r) == 0 <=> l is same priority as r
+*/
+
+// fcfs or first come first serve
+int fcfs_comparer(const void* a, const void* b);
+
+int fcfs_comparer(const void* a, const void* b){
+  const job_t* job_a = (job_t*)a;
+  const job_t* job_b = (job_t*)b;
+
+  /* Order of operations.
+    1. Arrival time
+    2. Job id (which ever one's number is lower)
+  */
+
+  return job_a->arrival_time - job_b->arrival_time;
+
+}
+
+// sjf or shortest job first
+int sjf_comparer(const void* a, const void* b){
+  const job_t* job_a = (job_t*)a;
+  const job_t* job_b = (job_t*)b;
+
+  /*
+  Order of operations:
+    1. check shortest running_time
+
+  */
+
+  return job_a->burst_time - job_b->burst_time;
+}
+
+int psjf_comparer(const void* a, const void* b){
+  return ((job_t*)a)->remaining_time - ((job_t*)b)->remaining_time;
+}
+
+int priority_comparer(const void* a, const void* b){
+  return ((job_t*)a)->priority - ((job_t*)b)->priority;
+}
+
+int rr_comparer(const void* a, const void* b){
+  job_t* job_a = (job_t*)a;
+  job_t* job_b = (job_t*)b;
+
+  if (job_a->time_last_updated == job_b->time_last_updated){
+    return job_a->arrival_time - job_b->arrival_time;
+  }
+
+  return job_a->time_last_updated - job_b->time_last_updated;
+}
+
+
 /**
   Initalizes the scheduler.
  
@@ -60,8 +136,37 @@ void scheduler_start_up(int cores, scheme_t scheme)
 
   total_cores = cores;
   job_scheme = scheme;
-  core_status = (job_t**)calloc(cores, sizeof(job_t));
-  priqueue_init(&job_queue, )
+  core_status = (job_t**)calloc(cores, sizeof(job_t*));
+
+  int (*comparer) (const void* a, const void* b);
+  switch (job_scheme){
+    case FCFS:
+      comparer = fcfs_comparer;
+      break;
+    case SJF:
+      comparer = sjf_comparer;
+      break;
+    case PSJF:
+      comparer = psjf_comparer;
+      break;
+    case PRI: // priority and premptive priority can be the same when using the job_queue. Difference will be in scheduler new job functions
+    case PPRI:
+      comparer = priority_comparer;
+      break;
+    case RR:
+
+      // figure out weirdo zone here seperately
+      comparer = rr_comparer; // round robin is in first come first serve order
+      break;
+    default:
+      fprintf(stderr, "ERROR: invalid job queue scheme given\n");
+      exit(EXIT_FAILURE);
+  }
+
+  priqueue_init(&job_queue, comparer);
+  
+  // easiest way for me to think to implement this without making like a stack
+  priqueue_init(&completed_jobs, completed_jobs_comparer);
 
 }
 
@@ -86,9 +191,143 @@ void scheduler_start_up(int cores, scheme_t scheme)
   @return -1 if no scheduling changes should be made. 
  
  */
+
+bool should_new_job_be_added(job_t* new_job){
+
+  priqueue_offer(&job_queue, new_job);
+  job_t* top_job = priqueue_peek(&job_queue);
+
+  if (top_job == new_job){  // TRUE new job is the one that should be added
+    priqueue_remove_at(&job_queue, 0); // get rid of new job from job queue 
+    return true;  // new_job shouldn't be scheduled
+  }
+
+  return false;
+
+
+}
 int scheduler_new_job(int job_number, int time, int running_time, int priority)
 {
-	return -1;
+
+  job_t* new_job = (job_t*)calloc(1, sizeof(job_t));
+
+  if (new_job == NULL){
+    fprintf(stderr, "ERROR: unable to create new job\n");
+    exit(EXIT_FAILURE);
+  }
+
+  new_job->id = job_number;
+  new_job->arrival_time = time;
+  new_job->burst_time = running_time;
+  new_job->remaining_time = running_time;  // for psjf
+  new_job->priority = priority;
+  new_job->start_time = -1;
+
+  int i;
+
+
+  // check if any cores are empty
+  for (i = 0; i < total_cores; i++){
+
+    if (core_status[i] == NULL){
+      new_job->start_time = time;
+      new_job->time_last_updated = time;
+      core_status[i] = new_job;
+      return i;
+    }
+  }
+
+
+
+
+  switch (job_scheme)
+  {
+  case PSJF: {
+    if (should_new_job_be_added(new_job) == false){
+      return -1;
+    }
+    int best_core_index = -1;
+    int max_difference = 1;
+
+    job_t* preempt_job;
+
+    for (i = 0; i < total_cores; i++){
+      assert(core_status[i] != NULL);
+      
+
+      job_t* compare_job = core_status[i];
+
+      compare_job->remaining_time -= (time - compare_job->time_last_updated);   // update remaining time for all cores
+      core_status[i]->time_last_updated = time;
+
+      const int difference = new_job->remaining_time - compare_job->remaining_time;
+
+      if (difference < max_difference){
+        preempt_job = compare_job;
+        best_core_index = i;
+        max_difference = difference;
+      }
+    }
+
+    if (best_core_index != -1){
+      new_job->time_last_updated = time;
+      if (new_job->start_time == -1){
+        new_job->start_time = time;
+      }
+      core_status[best_core_index] = new_job;
+      priqueue_offer(&job_queue, preempt_job);
+      return best_core_index;
+    }
+    
+    break;
+  }
+  // might need to change to pick the most optimal core and not the first it sees
+  case PPRI: {
+    if (should_new_job_be_added(new_job) == false){
+      return -1;
+    }
+
+    int best_core_index = -1;
+    int max_difference = 1;
+
+    job_t* preempt_job;
+
+    for (i = 0; i < total_cores; i++){
+      assert(core_status[i] != NULL);
+
+      job_t* compare_job = core_status[i];
+      const int difference = new_job->priority - compare_job->priority;
+
+      if (difference < max_difference){  // new job had a greater priority
+        best_core_index = i;
+        preempt_job = compare_job;
+        max_difference = difference;
+      }
+    }
+    if (best_core_index != -1){
+      if (new_job->start_time == -1){
+        new_job->start_time = time;
+      }
+      core_status[best_core_index] = new_job;
+      priqueue_offer(&job_queue, preempt_job);
+      return best_core_index;
+    } 
+
+    break;
+  }
+  case RR: 
+    // update all times for the cores for quantum check
+    for (i = 0; i < total_cores; i++){
+      core_status[i]->time_last_updated = time; 
+    }
+  default:  // if we don't allow premting in the first place
+    priqueue_offer(&job_queue, new_job);
+    return -1;
+    break;
+  }
+  
+  priqueue_offer(&job_queue, new_job); // new job must wait for ready queue
+  return -1;
 }
 
 
@@ -108,7 +347,36 @@ int scheduler_new_job(int job_number, int time, int running_time, int priority)
  */
 int scheduler_job_finished(int core_id, int job_number, int time)
 {
-	return -1;
+  job_t* finished_job = core_status[core_id]; 
+
+  assert(finished_job != NULL); // ensure that finished_job is in fact not null
+  assert(finished_job->id == job_number); // ensure that we are removing the correct job
+
+  // update finished job
+  finished_job->remaining_time = 0;
+  finished_job->time_last_updated = time;
+  finished_job->end_time = time; 
+
+  core_status[core_id] = NULL;
+
+
+
+  priqueue_offer(&completed_jobs, finished_job);  // add finished job to completed jobs "queue"
+  
+  if (priqueue_peek(&job_queue) == NULL){
+    return -1;
+  }
+
+  job_t* job_to_add = priqueue_remove_at(&job_queue, 0);
+  if (job_to_add->start_time == -1){
+    job_to_add->start_time = time;
+  }
+
+  core_status[core_id] = job_to_add;
+
+
+  return job_to_add->id;
+
 }
 
 
@@ -127,7 +395,18 @@ int scheduler_job_finished(int core_id, int job_number, int time)
  */
 int scheduler_quantum_expired(int core_id, int time)
 {
-	return -1;
+  job_t* expired_job = core_status[core_id];
+  assert(expired_job != NULL);
+
+  expired_job->time_last_updated = time;
+  
+  if (priqueue_peek(&job_queue) == NULL){
+    return -1;
+  }
+  job_t* new_job = priqueue_remove_at(&job_queue, 0);
+  priqueue_offer(&job_queue, expired_job);
+  core_status[core_id] = new_job;
+	return new_job->id;
 }
 
 
@@ -140,7 +419,24 @@ int scheduler_quantum_expired(int core_id, int time)
  */
 float scheduler_average_waiting_time()
 {
-	return 0.0;
+  if (priqueue_peek(&completed_jobs) == NULL){
+    fprintf(stderr, "ERROR: when schedking schedule average waiting time, completed jobs queue was empty");
+    exit(EXIT_FAILURE);
+  }
+
+  int total_waiting_time = 0;
+  int n = priqueue_size(&completed_jobs);
+
+  int i;
+
+  for (i = 0; i < n; i++){
+    job_t* job = priqueue_at(&completed_jobs, i);
+    assert(job != NULL);  // job should not be empty when iterating through queue
+
+    total_waiting_time += job->end_time - job->arrival_time - job->burst_time;
+  }
+  return (float)total_waiting_time/n;
+  
 }
 
 
@@ -153,7 +449,16 @@ float scheduler_average_waiting_time()
  */
 float scheduler_average_turnaround_time()
 {
-	return 0.0;
+  int total_turnaround_time = 0;
+
+
+  int n = priqueue_size(&completed_jobs);
+  for (int i = 0; i < n; i++){
+    job_t* job = priqueue_at(&completed_jobs, i);
+    total_turnaround_time += job->end_time - job->arrival_time;
+  }
+  return (float)total_turnaround_time/n;
+
 }
 
 
@@ -166,7 +471,18 @@ float scheduler_average_turnaround_time()
  */
 float scheduler_average_response_time()
 {
-	return 0.0;
+  int total_response_time = 0;
+
+  int n = priqueue_size(&completed_jobs);
+
+  for (int i = 0; i < n; i++){
+    job_t* job = priqueue_at(&completed_jobs, i);
+    assert(job != NULL);
+    total_response_time += job->start_time - job->arrival_time;
+  }
+
+  return (float)total_response_time/n;
+
 }
 
 
@@ -178,6 +494,26 @@ float scheduler_average_response_time()
 */
 void scheduler_clean_up()
 {
+  
+  int i, n;
+  n = priqueue_size(&job_queue);
+  for (i = (n-1); i >= 0; i--){
+    free(priqueue_remove_at(&job_queue, i));
+  }
+  priqueue_destroy(&job_queue);
+
+  n = priqueue_size(&completed_jobs);
+  for (i = (n-1); i >= 0; i--){
+    free(priqueue_remove_at(&completed_jobs, i));
+  } 
+  priqueue_destroy(&completed_jobs);
+
+  for (i = 0; i < total_cores; i++){
+    free(core_status[i]);
+  }
+
+  free(core_status);
+
 
 }
 
@@ -186,7 +522,10 @@ void scheduler_clean_up()
   This function may print out any debugging information you choose. This
   function will be called by the simulator after every call the simulator
   makes to your scheduler.
-  In our provided output, we have implemented this function to list the jobs in the order they are to be scheduled. Furthermore, we have also listed the current state of the job (either running on a given core or idle). For example, if we have a non-preemptive algorithm and job(id=4) has began running, job(id=2) arrives with a higher priority, and job(id=1) arrives with a lower priority, the output in our sample output will be:
+  In our provided output, we have implemented this function to list the jobs in the order they are to be scheduled. 
+  Furthermore, we have also listed the current state of the job (either running on a given core or idle). 
+  For example, if we have a non-preemptive algorithm and job(id=4) has began running, job(id=2) arrives with a higher priority, 
+  and job(id=1) arrives with a lower priority, the output in our sample output will be:
 
     2(-1) 4(0) 1(-1)  
   
