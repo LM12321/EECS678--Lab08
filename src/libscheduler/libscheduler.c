@@ -101,7 +101,11 @@ int psjf_comparer(const void* a, const void* b){
 }
 
 int priority_comparer(const void* a, const void* b){
-  return ((job_t*)a)->priority - ((job_t*)b)->priority;
+  const int priority_difference = ((job_t*)a)->priority - ((job_t*)b)->priority;
+  if (priority_difference == 0){
+    return ((job_t*)a)->arrival_time - ((job_t*)b)->arrival_time;
+  }
+  return priority_difference;
 }
 
 int rr_comparer(const void* a, const void* b){
@@ -188,21 +192,6 @@ void scheduler_start_up(int cores, scheme_t scheme)
   @return -1 if no scheduling changes should be made. 
  
  */
-
-bool should_new_job_be_added(job_t* new_job){
-
-  priqueue_offer(&job_queue, new_job);
-  job_t* top_job = priqueue_peek(&job_queue);
-
-  if (top_job == new_job){  // TRUE new job is the one that should be added
-    priqueue_remove_at(&job_queue, 0); // get rid of new job from job queue 
-    return true;  // new_job shouldn't be scheduled
-  }
-
-  return false;
-
-
-}
 int scheduler_new_job(int job_number, int time, int running_time, int priority)
 {
 
@@ -242,22 +231,19 @@ int scheduler_new_job(int job_number, int time, int running_time, int priority)
   switch (job_scheme)
   {
   case PSJF: {
-    if (should_new_job_be_added(new_job) == false){
-      return -1;
-    }
+
+    // initialize variables
     int best_core_index = -1;
     int max_difference = 1;
-
-    job_t* preempt_job;
+    job_t* preempt_job = NULL;
 
     for (i = 0; i < total_cores; i++){
       assert(core_status[i] != NULL);
-      
-
-      job_t* compare_job = core_status[i];
+    
+      job_t* compare_job = core_status[i]; 
 
       compare_job->remaining_time -= (time - compare_job->time_last_updated);   // update remaining time for all cores
-      core_status[i]->time_last_updated = time;
+      compare_job->time_last_updated = time;
 
       const int difference = new_job->remaining_time - compare_job->remaining_time;
 
@@ -274,6 +260,7 @@ int scheduler_new_job(int job_number, int time, int running_time, int priority)
         new_job->start_time = time;
       }
       core_status[best_core_index] = new_job;
+      
       priqueue_offer(&job_queue, preempt_job);
       return best_core_index;
     }
@@ -282,26 +269,25 @@ int scheduler_new_job(int job_number, int time, int running_time, int priority)
   }
   // might need to change to pick the most optimal core and not the first it sees
   case PPRI: {
-    if (should_new_job_be_added(new_job) == false){
-      return -1;
-    }
 
     int best_core_index = -1;
-    int max_difference = 1;
+    int max_priority = 1;
 
-    job_t* preempt_job;
+
+    job_t* preempt_job = NULL;
 
     for (i = 0; i < total_cores; i++){
       assert(core_status[i] != NULL);
 
       job_t* compare_job = core_status[i];
-      const int difference = new_job->priority - compare_job->priority;
+      const int priority_difference = new_job->priority - compare_job->priority;
 
-      if (difference < max_difference){  // new job had a greater priority
+      /**/
+      if (priority_difference < max_priority){  // new job had a greater priority
         best_core_index = i;
         preempt_job = compare_job;
-        max_difference = difference;
-      }
+        max_priority = priority_difference;
+      } 
     }
     if (best_core_index != -1){
       if (new_job->start_time == -1){
@@ -324,6 +310,7 @@ int scheduler_new_job(int job_number, int time, int running_time, int priority)
     break;
   }
   
+  // preempt failed
   priqueue_offer(&job_queue, new_job); // new job must wait for ready queue
   return -1;
 }
@@ -411,6 +398,10 @@ int scheduler_quantum_expired(int core_id, int time)
   // new job to add
   job_t* new_job = priqueue_remove_at(&job_queue, 0);
   new_job->quantum_order = -1; // set quantum order to a negative value
+
+  if (new_job->start_time == -1){   // set start time 
+    new_job->start_time = time;
+  }
   core_status[core_id] = new_job;
 
   // decrement all quantum orders in the job queue by 1 to account for the decrease in size
